@@ -27,6 +27,9 @@ export interface ReconcileDecision {
     | 'ao_session_terminal_without_completion_marker'
     | 'retry_requeued'
     | 'retry_exhausted'
+    | 'missing_session_identity'
+    | 'session_identity_mismatch'
+    | 'ao_session_lookup_unresolved'
     | 'dependencies_satisfied'
     | 'all_packets_completed';
   correlationId?: string;

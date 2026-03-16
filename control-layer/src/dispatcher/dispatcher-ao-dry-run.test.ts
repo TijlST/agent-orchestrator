@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import { runDispatcherAoDryRun } from './dispatcher-ao-dry-run.js';
+import { runDispatcherAoExec } from './dispatcher-ao-exec.js';
+import type { Session } from '../../../packages/core/dist/index.js';
 import type { TaskPacket } from '../types/task-packet.js';
 import type { DispatchDecisionReason } from '../types/dispatcher.js';
 
@@ -65,6 +67,67 @@ async function runWithPackets(planId: string, packets: TaskPacket[], maxDispatch
     const persistedPackets = JSON.parse(await readFile(packetFilePath, 'utf8')) as TaskPacket[];
 
     return { result, persistedPackets };
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+    await unlink(dispatchFilePath).catch(() => {});
+  }
+}
+
+function createSession(sessionId: string): Session {
+  return {
+    id: sessionId,
+    projectId: 'project-1',
+    status: 'working',
+    activity: null,
+    branch: null,
+    issueId: null,
+    pr: null,
+    workspacePath: null,
+    runtimeHandle: {
+      id: sessionId,
+      runtimeName: 'tmux',
+      data: {},
+    },
+    agentInfo: null,
+    createdAt: new Date(FIXED_TIME),
+    lastActivityAt: new Date(FIXED_TIME),
+    metadata: {},
+  };
+}
+
+async function runAoExecWithPackets(planId: string, packets: TaskPacket[], maxDispatches?: number) {
+  const rootDir = await mkdtemp(join(tmpdir(), 'dispatcher-ao-exec-'));
+  const packetFilePath = join(rootDir, `${planId}.json`);
+  const dispatchFilePath = resolveDispatchFilePath(planId);
+
+  await writeFile(packetFilePath, `${JSON.stringify(packets, null, 2)}\n`, 'utf8');
+
+  try {
+    const spawnCalls: Array<Record<string, unknown>> = [];
+    const sendCalls: Array<{ sessionId: string; instruction: string }> = [];
+
+    const result = await runDispatcherAoExec(
+      {
+        planId,
+        packetFile: packetFilePath,
+        maxDispatches,
+        timestamp: FIXED_TIME,
+      },
+      {
+        createSessionManager: async () => ({
+          spawn: async (config: Record<string, unknown>) => {
+            spawnCalls.push(config);
+            return createSession('spawned-session-1');
+          },
+          send: async (sessionId: string, instruction: string) => {
+            sendCalls.push({ sessionId, instruction });
+          },
+        } as any),
+      },
+    );
+
+    const persistedPackets = JSON.parse(await readFile(packetFilePath, 'utf8')) as TaskPacket[];
+    return { result, persistedPackets, spawnCalls, sendCalls };
   } finally {
     await rm(rootDir, { recursive: true, force: true });
     await unlink(dispatchFilePath).catch(() => {});
@@ -217,4 +280,150 @@ test('dry-run decision reasons stay explicit and machine-friendly', async () => 
     assert.equal(knownReasons.includes(decision.reason), true);
     assert.match(decision.reason, /^[a-z]+(?:_[a-z]+)*$/);
   }
+});
+
+test('ao-exec spawns a new session when packet sessionId is missing and continues dispatch', async () => {
+  const planId = 'plan-ao-exec-spawn';
+  const packet = createPacket({
+    planId,
+    packetId: 'packet-spawn',
+    sessionId: undefined,
+    completionCriteria: {},
+  });
+
+  const { result, persistedPackets, spawnCalls, sendCalls } = await runAoExecWithPackets(planId, [packet]);
+
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(spawnCalls[0], {
+    sessionId: 'packet-spawn',
+    projectId: 'project-1',
+    prompt: 'echo "dry-run"',
+  });
+  assert.equal(sendCalls.length, 0);
+
+  assert.equal(result.dispatchedCount, 1);
+  assert.equal(result.decisions[0]?.reason, 'dispatched_to_session');
+  assert.equal(result.decisions[0]?.toStatus, 'waiting');
+
+  assert.equal(persistedPackets[0]?.sessionId, 'spawned-session-1');
+  assert.equal(persistedPackets[0]?.completionCriteria.expectedSessionId, 'spawned-session-1');
+  assert.equal(persistedPackets[0]?.status, 'waiting');
+});
+
+test('ao-exec sends instruction to existing session when packet sessionId is already set', async () => {
+  const planId = 'plan-ao-exec-existing-session';
+  const packet = createPacket({
+    planId,
+    packetId: 'packet-existing',
+    sessionId: 'session-existing',
+    completionCriteria: {},
+  });
+
+  const { result, persistedPackets, spawnCalls, sendCalls } = await runAoExecWithPackets(planId, [packet]);
+
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(sendCalls.length, 1);
+  assert.equal(sendCalls[0]?.sessionId, 'session-existing');
+  assert.equal(sendCalls[0]?.instruction, 'echo "dry-run"');
+
+  assert.equal(result.dispatchedCount, 1);
+  assert.equal(result.decisions[0]?.reason, 'dispatched_to_session');
+  assert.equal(result.decisions[0]?.toStatus, 'waiting');
+
+  assert.equal(persistedPackets[0]?.sessionId, 'session-existing');
+  assert.equal(persistedPackets[0]?.completionCriteria.expectedSessionId, 'session-existing');
+  assert.equal(persistedPackets[0]?.status, 'waiting');
+});
+
+test('ao-exec skips non-ready packet with skipped_not_ready', async () => {
+  const planId = 'plan-ao-exec-not-ready';
+  const packet = createPacket({
+    planId,
+    packetId: 'packet-not-ready',
+    status: 'waiting',
+  });
+
+  const { result, persistedPackets, spawnCalls, sendCalls } = await runAoExecWithPackets(planId, [packet]);
+
+  assert.equal(result.dispatchedCount, 0);
+  assert.equal(result.skippedCount, 1);
+  assert.equal(result.decisions[0]?.reason, 'skipped_not_ready');
+  assert.equal(result.decisions[0]?.outcome, 'skipped');
+  assert.equal(result.decisionCounts.skipped_not_ready, 1);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(sendCalls.length, 0);
+  assert.equal(persistedPackets[0]?.status, 'waiting');
+});
+
+test('ao-exec skips queued packet with unsatisfied dependency', async () => {
+  const planId = 'plan-ao-exec-dependency-block';
+  const packet = createPacket({
+    planId,
+    packetId: 'packet-dependency',
+    status: 'queued',
+    dependencies: ['packet-missing'],
+  });
+
+  const { result, persistedPackets, spawnCalls, sendCalls } = await runAoExecWithPackets(planId, [packet]);
+
+  assert.equal(result.dispatchedCount, 0);
+  assert.equal(result.skippedCount, 1);
+  assert.equal(result.decisions[0]?.reason, 'skipped_dependency_not_satisfied');
+  assert.equal(result.decisions[0]?.outcome, 'skipped');
+  assert.equal(result.decisionCounts.skipped_dependency_not_satisfied, 1);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(sendCalls.length, 0);
+  assert.equal(persistedPackets[0]?.status, 'queued');
+});
+
+test('ao-exec skips risk or approval blocked packet', async () => {
+  const planId = 'plan-ao-exec-risk-block';
+  const packet = createPacket({
+    planId,
+    packetId: 'packet-risk-blocked',
+    approvalState: 'pending',
+  });
+
+  const { result, persistedPackets, spawnCalls, sendCalls } = await runAoExecWithPackets(planId, [packet]);
+
+  assert.equal(result.dispatchedCount, 0);
+  assert.equal(result.skippedCount, 1);
+  assert.equal(result.decisions[0]?.reason, 'skipped_risk_or_approval_block');
+  assert.equal(result.decisions[0]?.outcome, 'skipped');
+  assert.equal(result.decisionCounts.skipped_risk_or_approval_block, 1);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(sendCalls.length, 0);
+  assert.equal(persistedPackets[0]?.status, 'ready');
+});
+
+test('ao-exec skips ready packet when dispatch capacity is exhausted', async () => {
+  const planId = 'plan-ao-exec-capacity';
+  const packets: TaskPacket[] = [
+    createPacket({
+      planId,
+      packetId: 'packet-dispatched',
+      completionCriteria: {},
+    }),
+    createPacket({
+      planId,
+      packetId: 'packet-capacity-skipped',
+      completionCriteria: {},
+    }),
+  ];
+
+  const { result, persistedPackets, spawnCalls, sendCalls } = await runAoExecWithPackets(planId, packets, 1);
+
+  assert.equal(result.dispatchedCount, 1);
+  assert.equal(result.skippedCount, 1);
+  assert.equal(result.decisions.length, 2);
+  assert.equal(result.decisions[0]?.reason, 'dispatched_to_session');
+  assert.equal(result.decisions[0]?.outcome, 'dispatched');
+  assert.equal(result.decisions[1]?.reason, 'skipped_no_dispatch_capacity');
+  assert.equal(result.decisions[1]?.outcome, 'skipped');
+  assert.equal(result.decisionCounts.dispatched_to_session, 1);
+  assert.equal(result.decisionCounts.skipped_no_dispatch_capacity, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(sendCalls.length, 0);
+  assert.equal(persistedPackets[0]?.status, 'waiting');
+  assert.equal(persistedPackets[1]?.status, 'ready');
 });

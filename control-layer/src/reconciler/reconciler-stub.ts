@@ -29,6 +29,16 @@ const DEFAULT_ACTOR = 'control-layer-reconciler';
 
 type ReconcilerSessionManager = Pick<OpenCodeSessionManager, 'get'>;
 type RetryResolution = 'requeue' | 'exhausted';
+type SessionIdentityBlockReason =
+  | 'missing_session_identity'
+  | 'session_identity_mismatch'
+  | 'ao_session_lookup_unresolved';
+
+interface SessionIdentityResolution {
+  ok: boolean;
+  lookupSessionId?: string;
+  reason?: SessionIdentityBlockReason;
+}
 
 export interface ReconcilerStubDependencies {
   stateRoot?: string;
@@ -128,6 +138,81 @@ function createPlanCompletedLogEntry(
     message: 'Plan marked completed; all packets are completed.',
     metadata: {
       localStub: false,
+    },
+  };
+}
+
+function normalizeSessionId(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function resolvePacketSessionIdentity(packet: TaskPacket): SessionIdentityResolution {
+  const packetSessionId = normalizeSessionId(packet.sessionId);
+  const expectedSessionId = normalizeSessionId(packet.completionCriteria.expectedSessionId);
+
+  if (packetSessionId && expectedSessionId) {
+    if (packetSessionId !== expectedSessionId) {
+      return {
+        ok: false,
+        reason: 'session_identity_mismatch',
+      };
+    }
+
+    return {
+      ok: true,
+      lookupSessionId: packetSessionId,
+    };
+  }
+
+  if (packetSessionId) {
+    return {
+      ok: true,
+      lookupSessionId: packetSessionId,
+    };
+  }
+
+  if (expectedSessionId) {
+    return {
+      ok: true,
+      lookupSessionId: expectedSessionId,
+    };
+  }
+
+  return {
+    ok: false,
+    reason: 'missing_session_identity',
+  };
+}
+
+function createPacketBlockedLogEntry(
+  packet: TaskPacket,
+  actor: string,
+  timestamp: string,
+  reason: SessionIdentityBlockReason,
+  lookupSessionId?: string,
+): ExecutionLogEntry {
+  return {
+    logId: `${packet.packetId}_log_reconcile_blocked_${timestamp}`,
+    timestamp,
+    correlationId: packet.correlationId,
+    planId: packet.planId,
+    packetId: packet.packetId,
+    projectId: packet.projectId,
+    sessionId: lookupSessionId ?? packet.sessionId,
+    eventType: 'completion_evaluated',
+    phase: 'reconciler',
+    actor,
+    result: 'info',
+    message: `Packet remained waiting due to ${reason}.`,
+    beforeStatus: packet.status,
+    afterStatus: packet.status,
+    metadata: {
+      reason,
+      localStub: false,
+      packetSessionId: normalizeSessionId(packet.sessionId),
+      expectedSessionId: normalizeSessionId(packet.completionCriteria.expectedSessionId),
+      lookupSessionId: lookupSessionId ?? null,
     },
   };
 }
@@ -252,30 +337,45 @@ export async function runReconcilerStub(
     }
 
     const timestamp = input.timestamp ?? createTimestamp();
-
-    if (!packet.sessionId?.trim()) {
-      packet.status = 'completed';
-      packet.completedAt = timestamp;
-      packet.updatedAt = timestamp;
-
+    const sessionIdentity = resolvePacketSessionIdentity(packet);
+    if (!sessionIdentity.ok) {
       decisions.push({
-        kind: 'packet_completed',
+        kind: 'packet_blocked',
         planId,
         packetId: packet.packetId,
         fromStatus: 'waiting',
-        toStatus: 'completed',
-        reason: 'stub_waiting_locally_completable',
+        toStatus: 'waiting',
+        reason: sessionIdentity.reason ?? 'missing_session_identity',
         correlationId: packet.correlationId,
       });
-
       logEntries.push(
-        createPacketStatusLogEntry(
+        createPacketBlockedLogEntry(
           packet,
           actor,
           timestamp,
-          'waiting',
-          'completed',
-          'stub_waiting_locally_completable',
+          sessionIdentity.reason ?? 'missing_session_identity',
+        ),
+      );
+      continue;
+    }
+
+    const lookupSessionId = sessionIdentity.lookupSessionId;
+    if (!lookupSessionId) {
+      decisions.push({
+        kind: 'packet_blocked',
+        planId,
+        packetId: packet.packetId,
+        fromStatus: 'waiting',
+        toStatus: 'waiting',
+        reason: 'missing_session_identity',
+        correlationId: packet.correlationId,
+      });
+      logEntries.push(
+        createPacketBlockedLogEntry(
+          packet,
+          actor,
+          timestamp,
+          'missing_session_identity',
         ),
       );
       continue;
@@ -285,9 +385,27 @@ export async function runReconcilerStub(
       sessionManager = await createSessionManager();
     }
 
-    const session = await sessionManager.get(packet.sessionId);
+    const session = await sessionManager.get(lookupSessionId);
 
     if (!session) {
+      decisions.push({
+        kind: 'packet_blocked',
+        planId,
+        packetId: packet.packetId,
+        fromStatus: 'waiting',
+        toStatus: 'waiting',
+        reason: 'ao_session_lookup_unresolved',
+        correlationId: packet.correlationId,
+      });
+      logEntries.push(
+        createPacketBlockedLogEntry(
+          packet,
+          actor,
+          timestamp,
+          'ao_session_lookup_unresolved',
+          lookupSessionId,
+        ),
+      );
       continue;
     }
 
@@ -334,7 +452,7 @@ export async function runReconcilerStub(
       ? 'ao_session_terminal_without_completion_marker'
       : 'ao_session_needs_input';
     const retryOutcome = resolveRetryOutcome(packet);
-    const sessionId = packet.sessionId;
+    const sessionId = lookupSessionId;
     if (!sessionId) {
       continue;
     }

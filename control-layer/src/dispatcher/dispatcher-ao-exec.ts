@@ -27,6 +27,10 @@ import { getSessionManager } from '../../../packages/cli/dist/lib/create-session
 const DEFAULT_ACTOR = 'control-layer-dispatcher';
 const FAILURE_CODE = 'ao_exec_dispatch_failed';
 
+interface AoExecDispatcherDeps {
+  createSessionManager?: () => Promise<OpenCodeSessionManager>;
+}
+
 function resolveControlLayerRoot(): string {
   const currentFilePath = fileURLToPath(import.meta.url);
   const currentDir = dirname(currentFilePath);
@@ -60,16 +64,23 @@ function areDependenciesSatisfied(packet: TaskPacket, packetsById: Map<string, T
   });
 }
 
-function isDispatchable(packet: TaskPacket, packetsById: Map<string, TaskPacket>): boolean {
-  if (packet.status === 'ready') {
-    return true;
+function canDispatchInLocalSafeMode(packet: TaskPacket): boolean {
+  const approvalAllowed = packet.approvalState === 'not_required' || packet.approvalState === 'approved';
+  return packet.riskTier === 'read_only' && approvalAllowed;
+}
+
+function resolveDispatchCapacity(input: DispatcherInput): number | null {
+  if (typeof input.maxDispatches === 'number' && Number.isFinite(input.maxDispatches)) {
+    return Math.max(0, Math.floor(input.maxDispatches));
   }
 
-  if (packet.status === 'queued') {
-    return areDependenciesSatisfied(packet, packetsById);
+  const rawCapacity = process.env.CONTROL_LAYER_DISPATCH_MAX;
+  if (!rawCapacity) {
+    return null;
   }
 
-  return false;
+  const parsed = Number.parseInt(rawCapacity, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function createDecisionCounts(): Record<DispatchDecisionReason, number> {
@@ -225,6 +236,32 @@ function createDispatchStartedLogEntry(
   };
 }
 
+function createSessionSpawnedLogEntry(
+  packet: TaskPacket,
+  actor: string,
+  timestamp: string,
+): ExecutionLogEntry {
+  return {
+    logId: `${packet.packetId}_log_session_spawned_${timestamp}_${packet.attempt + 1}`,
+    timestamp,
+    correlationId: packet.correlationId,
+    planId: packet.planId,
+    packetId: packet.packetId,
+    projectId: packet.projectId,
+    sessionId: packet.sessionId,
+    eventType: 'session_spawned',
+    phase: 'dispatcher',
+    actor,
+    result: 'info',
+    message: 'AO exec dispatcher spawned new session',
+    attempt: packet.attempt + 1,
+    metadata: {
+      action: packet.action,
+      mode: 'ao-exec',
+    },
+  };
+}
+
 function createDispatchSucceededLogEntry(
   packet: TaskPacket,
   actor: string,
@@ -306,7 +343,10 @@ function createDispatchFailedLogEntry(
   };
 }
 
-export async function runDispatcherAoExec(input: DispatcherInput): Promise<DispatchResult> {
+export async function runDispatcherAoExec(
+  input: DispatcherInput,
+  deps: AoExecDispatcherDeps = {},
+): Promise<DispatchResult> {
   if (!input.planId && !input.packetFile) {
     throw new Error('Either planId or packetFile must be provided.');
   }
@@ -345,14 +385,41 @@ export async function runDispatcherAoExec(input: DispatcherInput): Promise<Dispa
   const decisionCounts = createDecisionCounts();
   const payloads: DryRunDispatchPayload[] = [];
   const logEntries: ExecutionLogEntry[] = [];
+  const dispatchCapacity = resolveDispatchCapacity(input);
+  let dispatchedCount = 0;
   let sessionManager: OpenCodeSessionManager | null = null;
 
   for (const packet of packets) {
-    if (!isDispatchable(packet, packetsById)) {
+    let skippedReason: DispatchDecisionReason | null = null;
+    if (packet.status === 'queued' && !areDependenciesSatisfied(packet, packetsById)) {
+      skippedReason = 'skipped_dependency_not_satisfied';
+    } else if (packet.status !== 'queued' && packet.status !== 'ready') {
+      skippedReason = 'skipped_not_ready';
+    } else if (!canDispatchInLocalSafeMode(packet)) {
+      skippedReason = 'skipped_risk_or_approval_block';
+    } else if (dispatchCapacity !== null && dispatchedCount >= dispatchCapacity) {
+      skippedReason = 'skipped_no_dispatch_capacity';
+    }
+
+    if (skippedReason) {
+      const decision: DispatchDecision = {
+        planId,
+        packetId: packet.packetId,
+        action: packet.action,
+        fromStatus: packet.status,
+        toStatus: packet.status,
+        mode: 'ao-exec',
+        outcome: 'skipped',
+        reason: skippedReason,
+        correlationId: packet.correlationId,
+      };
+      decisions.push(decision);
+      decisionCounts[skippedReason] += 1;
       continue;
     }
 
     const reason: DispatchDecisionReason = 'dispatched_to_session';
+    const fromStatus = packet.status;
     if (packet.status === 'queued') {
       packet.status = 'ready';
       logEntries.push(createQueuedToReadyLogEntry(packet, actor, timestamp, reason));
@@ -378,18 +445,36 @@ export async function runDispatcherAoExec(input: DispatcherInput): Promise<Dispa
       if (packet.action !== 'send_instruction') {
         throw new Error(`Unsupported action "${packet.action}" for ao-exec mode.`);
       }
-      if (!packet.sessionId?.trim()) {
-        throw new Error('Missing required sessionId for ao-exec dispatch.');
-      }
       if (!instruction) {
         throw new Error('Missing required packet.payload.instruction for ao-exec dispatch.');
       }
 
       if (!sessionManager) {
-        sessionManager = await createAoExecSessionManager();
+        sessionManager = deps.createSessionManager
+          ? await deps.createSessionManager()
+          : await createAoExecSessionManager();
       }
 
-      await sessionManager.send(packet.sessionId, instruction);
+      if (!packet.sessionId?.trim()) {
+        const spawnConfig = {
+          sessionId: packet.packetId,
+          projectId: packet.projectId,
+          prompt: instruction,
+        };
+        const session = await sessionManager.spawn(spawnConfig);
+        const spawnedSessionId =
+          (session as { sessionId?: unknown }).sessionId ?? (session as { id?: unknown }).id;
+
+        if (typeof spawnedSessionId !== 'string' || spawnedSessionId.trim().length === 0) {
+          throw new Error('Spawned AO session did not return a valid session id.');
+        }
+
+        packet.sessionId = spawnedSessionId;
+        packet.completionCriteria.expectedSessionId = spawnedSessionId;
+        logEntries.push(createSessionSpawnedLogEntry(packet, actor, timestamp));
+      } else {
+        await sessionManager.send(packet.sessionId, instruction);
+      }
 
       packet.status = 'waiting';
       packet.lastErrorCode = undefined;
@@ -400,7 +485,7 @@ export async function runDispatcherAoExec(input: DispatcherInput): Promise<Dispa
         planId,
         packetId: packet.packetId,
         action: packet.action,
-        fromStatus: 'ready',
+        fromStatus,
         outcome: 'dispatched',
         toStatus: 'waiting',
         mode: 'ao-exec',
@@ -410,6 +495,7 @@ export async function runDispatcherAoExec(input: DispatcherInput): Promise<Dispa
 
       decisions.push(decision);
       decisionCounts[decision.reason] += 1;
+      dispatchedCount += 1;
       payloads.push(toExecPayload(packet, timestamp));
       logEntries.push(createWaitingStatusLogEntry(packet, actor, timestamp));
       logEntries.push(createDispatchSucceededLogEntry(packet, actor, timestamp));
@@ -435,9 +521,11 @@ export async function runDispatcherAoExec(input: DispatcherInput): Promise<Dispa
     planId,
     packetFilePath,
     evaluatedCount: packets.length,
-    dispatchedCount: decisions.length,
-    skippedCount: packets.length - decisions.length,
-    dispatchedPacketIds: decisions.map((decision) => decision.packetId),
+    dispatchedCount: decisions.filter((decision) => decision.outcome === 'dispatched').length,
+    skippedCount: decisions.filter((decision) => decision.outcome === 'skipped').length,
+    dispatchedPacketIds: decisions
+      .filter((decision) => decision.outcome === 'dispatched')
+      .map((decision) => decision.packetId),
     decisions,
     decisionCounts,
     packets,

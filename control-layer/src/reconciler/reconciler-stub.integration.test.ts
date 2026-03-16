@@ -137,10 +137,10 @@ async function readExecutionLogEntries(stateRoot: string): Promise<ExecutionLogE
   }
 }
 
-test('waiting packet with no sessionId transitions to completed', async () => {
-  const planId = 'plan-local-complete';
+test('waiting packet with no session identities stays waiting and is blocked', async () => {
+  const planId = 'plan-missing-identity';
   const packet = createPacket({
-    packetId: 'packet-local',
+    packetId: 'packet-missing-identity',
     planId,
     status: 'waiting',
   });
@@ -165,44 +165,45 @@ test('waiting packet with no sessionId transitions to completed', async () => {
     const executionEntries = await readExecutionLogEntries(fixture.stateRoot);
     const statusLog = executionEntries.find(
       (entry) =>
-        entry.eventType === 'packet_status_changed' &&
-        entry.packetId === 'packet-local' &&
+        entry.eventType === 'completion_evaluated' &&
+        entry.packetId === 'packet-missing-identity' &&
         entry.beforeStatus === 'waiting' &&
-        entry.afterStatus === 'completed',
+        entry.afterStatus === 'waiting',
     );
 
-    assert.equal(updatedPackets[0]?.status, 'completed');
-    assert.equal(updatedPackets[0]?.completedAt, FIXED_TIME);
-    assert.equal(result.completedCount, 1);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(updatedPackets[0]?.completedAt, undefined);
+    assert.equal(result.completedCount, 0);
     assert.equal(result.requeuedCount, 0);
     assert.equal(result.failedCount, 0);
     assert.equal(
       result.decisions.some(
         (decision) =>
-          decision.kind === 'packet_completed' &&
-          decision.packetId === 'packet-local' &&
-          decision.reason === 'stub_waiting_locally_completable',
+          decision.kind === 'packet_blocked' &&
+          decision.packetId === 'packet-missing-identity' &&
+          decision.reason === 'missing_session_identity',
       ),
       true,
     );
     assert.equal(Boolean(statusLog), true);
     assert.equal(statusLog?.phase, 'reconciler');
-    assert.equal(statusLog?.metadata?.reason, 'stub_waiting_locally_completable');
+    assert.equal(statusLog?.metadata?.reason, 'missing_session_identity');
   } finally {
     await rm(fixture.rootDir, { recursive: true, force: true });
   }
 });
 
-test('waiting packet with repeated completion marker transitions to completed', async () => {
-  const planId = 'plan-marker-complete';
-  const marker = 'CONTROL_LAYER_DONE:packet-remote';
-  const sessionId = 'session-remote';
+test('waiting packet with matching packet.sessionId and expectedSessionId completes with repeated marker', async () => {
+  const planId = 'plan-matching-identities-complete';
+  const marker = 'CONTROL_LAYER_DONE:packet-matching';
+  const sessionId = 'session-matching';
   const packet = createPacket({
-    packetId: 'packet-remote',
+    packetId: 'packet-matching',
     planId,
     sessionId,
     status: 'waiting',
     payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
   });
   const fixture = await setupFixture(planId, [packet]);
 
@@ -240,6 +241,229 @@ test('waiting packet with repeated completion marker transitions to completed', 
     assert.equal(result.completedCount, 1);
     assert.equal(getCalls, 1);
     assert.equal(paneCalls, 1);
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('waiting packet with mismatched packet.sessionId and expectedSessionId stays waiting', async () => {
+  const planId = 'plan-mismatched-identities';
+  const marker = 'CONTROL_LAYER_DONE:packet-mismatch';
+  const packet = createPacket({
+    packetId: 'packet-mismatch',
+    planId,
+    sessionId: 'session-1',
+    status: 'waiting',
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: 'session-2' },
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  let getCalls = 0;
+  let paneCalls = 0;
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async () => {
+            getCalls += 1;
+            return createSession('session-1');
+          },
+        }),
+        capturePane: async () => {
+          paneCalls += 1;
+          return `${marker}\n${marker}`;
+        },
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(result.completedCount, 0);
+    assert.equal(
+      result.decisions.some(
+        (decision) =>
+          decision.kind === 'packet_blocked' &&
+          decision.packetId === 'packet-mismatch' &&
+          decision.reason === 'session_identity_mismatch',
+      ),
+      true,
+    );
+    assert.equal(getCalls, 0);
+    assert.equal(paneCalls, 0);
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('waiting packet with only completionCriteria.expectedSessionId uses it as lookup fallback', async () => {
+  const planId = 'plan-expected-fallback-complete';
+  const marker = 'CONTROL_LAYER_DONE:packet-expected';
+  const expectedSessionId = 'session-expected';
+  const packet = createPacket({
+    packetId: 'packet-expected',
+    planId,
+    status: 'waiting',
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId },
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async (id: string) => (id === expectedSessionId ? createSession(id) : null),
+        }),
+        capturePane: async () => `${marker}\n${marker}`,
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'completed');
+    assert.equal(updatedPackets[0]?.sessionId, undefined);
+    assert.equal(result.completedCount, 1);
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('waiting packet with only packet.sessionId present completes normally', async () => {
+  const planId = 'plan-packet-session-only';
+  const marker = 'CONTROL_LAYER_DONE:packet-session-only';
+  const sessionId = 'session-only';
+  const packet = createPacket({
+    packetId: 'packet-session-only',
+    planId,
+    sessionId,
+    status: 'waiting',
+    payload: { completionMarker: marker },
+    completionCriteria: {},
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async (id: string) => (id === sessionId ? createSession(id) : null),
+        }),
+        capturePane: async () => `${marker}\n${marker}`,
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'completed');
+    assert.equal(result.completedCount, 1);
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('waiting packet stays waiting when resolved lookup session cannot be found', async () => {
+  const planId = 'plan-session-lookup-unresolved';
+  const packet = createPacket({
+    packetId: 'packet-session-lookup-unresolved',
+    planId,
+    sessionId: 'session-missing',
+    status: 'waiting',
+    completionCriteria: { expectedSessionId: 'session-missing' },
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async () => null,
+        }),
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(result.completedCount, 0);
+    assert.equal(
+      result.decisions.some(
+        (decision) =>
+          decision.kind === 'packet_blocked' &&
+          decision.packetId === 'packet-session-lookup-unresolved' &&
+          decision.reason === 'ao_session_lookup_unresolved',
+      ),
+      true,
+    );
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('completion marker in the wrong session does not complete target packet', async () => {
+  const planId = 'plan-wrong-session-marker';
+  const marker = 'CONTROL_LAYER_DONE:packet-target';
+  const packet = createPacket({
+    packetId: 'packet-target',
+    planId,
+    sessionId: 'session-target',
+    status: 'waiting',
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: 'session-target' },
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  let capturedForSessionId: string | undefined;
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async (id: string) =>
+            id === 'session-target' ? createSession(id, { runtimeHandle: { id, runtimeName: 'tmux', data: {} } }) : null,
+        }),
+        capturePane: async (runtimeSessionId: string) => {
+          capturedForSessionId = runtimeSessionId;
+          if (runtimeSessionId === 'session-other') {
+            return `${marker}\n${marker}`;
+          }
+          return 'no marker for target session';
+        },
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(result.completedCount, 0);
+    assert.equal(capturedForSessionId, 'session-target');
   } finally {
     await rm(fixture.rootDir, { recursive: true, force: true });
   }
@@ -529,10 +753,15 @@ test('terminal session without repeated completion marker fails when retries are
 
 test('queued dependent packet unlocks when dependency completes in the same reconcile run', async () => {
   const planId = 'plan-dependency-unlock';
+  const marker = 'CONTROL_LAYER_DONE:packet-a';
+  const sessionId = 'session-a';
   const packetA = createPacket({
     packetId: 'packet-a',
     planId,
     status: 'waiting',
+    sessionId,
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
   });
   const packetB = createPacket({
     packetId: 'packet-b',
@@ -551,9 +780,10 @@ test('queued dependent packet unlocks when dependency completes in the same reco
       },
       {
         stateRoot: fixture.stateRoot,
-        createSessionManager: async () => {
-          throw new Error('session manager should not be created');
-        },
+        createSessionManager: async () => ({
+          get: async (id: string) => (id === sessionId ? createSession(id) : null),
+        }),
+        capturePane: async () => `${marker}\n${marker}`,
       },
     );
 
@@ -695,15 +925,25 @@ test('queued dependent packet does not unlock when dependency fails terminally',
 
 test('plan is marked completed when all packets are completed', async () => {
   const planId = 'plan-completed';
+  const sessionA = 'session-plan-1';
+  const sessionB = 'session-plan-2';
+  const markerA = 'CONTROL_LAYER_DONE:packet-1';
+  const markerB = 'CONTROL_LAYER_DONE:packet-2';
   const packetA = createPacket({
     packetId: 'packet-1',
     planId,
     status: 'waiting',
+    sessionId: sessionA,
+    payload: { completionMarker: markerA },
+    completionCriteria: { expectedSessionId: sessionA },
   });
   const packetB = createPacket({
     packetId: 'packet-2',
     planId,
     status: 'waiting',
+    sessionId: sessionB,
+    payload: { completionMarker: markerB },
+    completionCriteria: { expectedSessionId: sessionB },
   });
   const fixture = await setupFixture(planId, [packetA, packetB]);
 
@@ -716,9 +956,15 @@ test('plan is marked completed when all packets are completed', async () => {
       },
       {
         stateRoot: fixture.stateRoot,
-        createSessionManager: async () => {
-          throw new Error('session manager should not be created');
-        },
+        createSessionManager: async () => ({
+          get: async (id: string) => {
+            if (id === sessionA || id === sessionB) {
+              return createSession(id);
+            }
+            return null;
+          },
+        }),
+        capturePane: async (_id: string) => `${markerA}\n${markerA}\n${markerB}\n${markerB}`,
       },
     );
 
@@ -752,10 +998,15 @@ test('plan is marked completed when all packets are completed', async () => {
 
 test('execution log file contains expected reconcile entries for a local state-driven run', async () => {
   const planId = 'plan-execution-log-audit';
+  const marker = 'CONTROL_LAYER_DONE:packet-audit-a';
+  const sessionId = 'session-audit-a';
   const packetA = createPacket({
     packetId: 'packet-audit-a',
     planId,
     status: 'waiting',
+    sessionId,
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
   });
   const packetB = createPacket({
     packetId: 'packet-audit-b',
@@ -774,9 +1025,10 @@ test('execution log file contains expected reconcile entries for a local state-d
       },
       {
         stateRoot: fixture.stateRoot,
-        createSessionManager: async () => {
-          throw new Error('session manager should not be created');
-        },
+        createSessionManager: async () => ({
+          get: async (id: string) => (id === sessionId ? createSession(id) : null),
+        }),
+        capturePane: async () => `${marker}\n${marker}`,
       },
     );
 
@@ -789,7 +1041,7 @@ test('execution log file contains expected reconcile entries for a local state-d
           entry.packetId === 'packet-audit-a' &&
           entry.beforeStatus === 'waiting' &&
           entry.afterStatus === 'completed' &&
-          entry.metadata?.reason === 'stub_waiting_locally_completable',
+          entry.metadata?.reason === 'ao_session_terminal',
       ),
       true,
     );
