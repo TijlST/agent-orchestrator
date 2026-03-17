@@ -458,6 +458,59 @@ test('waiting packet with missing incoming event sessionId stays waiting', async
   }
 });
 
+test('waiting packet requires packet-scoped incoming events and ignores unscoped or unknown packet events', async () => {
+  const planId = 'plan-requires-packet-scoped-events';
+  const marker = 'CONTROL_LAYER_DONE:packet-scoped-only';
+  const sessionId = 'session-scoped-only';
+  const packet = createPacket({
+    packetId: 'packet-scoped-only',
+    planId,
+    sessionId,
+    status: 'waiting',
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+        incomingExecutionEvents: [
+          { sessionId },
+          { packetId: 'packet-other', sessionId },
+        ],
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async (id: string) => (id === sessionId ? createSession(id) : null),
+        }),
+        capturePane: async () => {
+          throw new Error('capturePane should not be called for unscoped incoming events');
+        },
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(result.completedCount, 0);
+    assert.equal(
+      result.decisions.some(
+        (decision) =>
+          decision.kind === 'packet_blocked' &&
+          decision.packetId === 'packet-scoped-only' &&
+          decision.reason === 'missing_session_identity',
+      ),
+      true,
+    );
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
 test('waiting packet with multiple candidate incoming events accepts only the exact sessionId match', async () => {
   const planId = 'plan-multiple-incoming-candidates';
   const marker = 'CONTROL_LAYER_DONE:packet-multi-candidate';

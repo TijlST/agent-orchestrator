@@ -120,11 +120,13 @@ export async function runPlanCycle(
     ? await dependencies.reconcileRunner({
         planId,
         packetFile: packetFilePath,
+        incomingExecutionEvents: input.incomingExecutionEvents,
       })
     : await runReconcilerStub(
         {
           planId,
           packetFile: packetFilePath,
+          incomingExecutionEvents: input.incomingExecutionEvents,
         },
         { stateRoot },
       );

@@ -4,9 +4,11 @@ import type {
   PlanStatusCounts,
   PlanStatusLatestReasons,
 } from './plan-status.js';
+import type { ReconcilerExecutionEvent } from './reconciler.js';
 
 export interface PlanCycleRunnerInput {
   planId: string;
+  incomingExecutionEvents?: ReconcilerExecutionEvent[];
 }
 
 export interface PlanCycleRunnerResult {

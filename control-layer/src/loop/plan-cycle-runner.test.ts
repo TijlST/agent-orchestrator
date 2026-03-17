@@ -8,7 +8,10 @@ import { runPlanCycle } from './plan-cycle-runner.js';
 import type { PlanState } from '../types/plan-state.js';
 import type { TaskPacket } from '../types/task-packet.js';
 import type { DispatchResult } from '../types/dispatcher.js';
-import type { ReconcileResult } from '../types/reconciler.js';
+import type {
+  ReconcileResult,
+  ReconcilerExecutionEvent,
+} from '../types/reconciler.js';
 
 const FIXED_TIME = '2026-03-16T12:00:00.000Z';
 
@@ -161,6 +164,39 @@ test('run-plan-cycle result includes operator summary from plan status', async (
     assert.equal(result.latestStopReasons.plan, null);
     assert.deepEqual(result.blockingReasons, []);
     assert.equal(result.stopReason, 'blocked_waiting');
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('run-plan-cycle forwards incoming execution events to reconciler input', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'plan-cycle-forward-incoming-events-'));
+  const stateRoot = join(rootDir, 'state');
+  const planId = 'plan-cycle-forward-incoming-events';
+  const packets = [createPacket({ packetId: 'packet-waiting', planId, status: 'waiting' })];
+  const incomingExecutionEvents: ReconcilerExecutionEvent[] = [
+    { packetId: 'packet-waiting', sessionId: 'session-1' },
+  ];
+
+  await writeFixture(rootDir, createPlan(planId, packets, 'active'), packets);
+
+  let reconcileInputEvents: ReconcilerExecutionEvent[] | undefined;
+
+  try {
+    await runPlanCycle(
+      { planId, incomingExecutionEvents },
+      {
+        stateRoot,
+        dispatchRunner: async () =>
+          createDispatchResult(planId, join(stateRoot, 'packets', `${planId}.json`)),
+        reconcileRunner: async (input) => {
+          reconcileInputEvents = input.incomingExecutionEvents;
+          return createReconcileResult(planId, stateRoot);
+        },
+      },
+    );
+
+    assert.deepEqual(reconcileInputEvents, incomingExecutionEvents);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

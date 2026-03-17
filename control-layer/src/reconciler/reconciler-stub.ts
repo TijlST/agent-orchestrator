@@ -199,6 +199,40 @@ function normalizeSessionId(value: string | undefined): string | undefined {
   return normalized ? normalized : undefined;
 }
 
+function normalizePacketId(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function scopeIncomingExecutionEventsByPacket(
+  incomingEvents: ReconcilerExecutionEvent[] | undefined,
+  packetIds: Set<string>,
+): Map<string, string[]> | undefined {
+  if (!incomingEvents) {
+    return undefined;
+  }
+
+  const scoped = new Map<string, Set<string>>();
+  for (const event of incomingEvents) {
+    const packetId = normalizePacketId(event.packetId);
+    const sessionId = normalizeSessionId(event.sessionId);
+    if (!packetId || !sessionId || !packetIds.has(packetId)) {
+      continue;
+    }
+
+    const sessionIdsForPacket = scoped.get(packetId) ?? new Set<string>();
+    sessionIdsForPacket.add(sessionId);
+    scoped.set(packetId, sessionIdsForPacket);
+  }
+
+  return new Map(
+    [...scoped.entries()].map(([packetId, sessionIdsForPacket]) => [
+      packetId,
+      [...sessionIdsForPacket].sort((left, right) => left.localeCompare(right)),
+    ]),
+  );
+}
+
 function resolveRequiredPacketSessionIdentity(packet: TaskPacket): SessionIdentityResolution {
   const packetSessionId = normalizeSessionId(packet.sessionId);
   const expectedSessionId = normalizeSessionId(readPacketExpectedSessionId(packet));
@@ -231,19 +265,14 @@ function resolveRequiredPacketSessionIdentity(packet: TaskPacket): SessionIdenti
 
 function resolveIncomingExecutionSessionIds(input: {
   packet: TaskPacket;
-  incomingEvents: ReconcilerExecutionEvent[] | undefined;
+  incomingSessionIdsByPacket: Map<string, string[]> | undefined;
   fallbackSessionId: string | undefined;
 }): string[] {
-  if (!input.incomingEvents) {
+  if (!input.incomingSessionIdsByPacket) {
     return input.fallbackSessionId ? [input.fallbackSessionId] : [];
   }
 
-  const normalizedIncomingSessionIds = input.incomingEvents
-    .filter((event) => event.packetId === undefined || event.packetId === input.packet.packetId)
-    .map((event) => normalizeSessionId(event.sessionId))
-    .filter((sessionId): sessionId is string => Boolean(sessionId));
-
-  return [...new Set(normalizedIncomingSessionIds)];
+  return input.incomingSessionIdsByPacket.get(input.packet.packetId) ?? [];
 }
 
 function resolveIncomingSessionIdentity(input: {
@@ -433,6 +462,11 @@ export async function runReconcilerStub(
   }
 
   const packetsById = new Map(packets.map((packet) => [packet.packetId, packet]));
+  const packetIds = new Set(packets.map((packet) => packet.packetId));
+  const incomingSessionIdsByPacket = scopeIncomingExecutionEventsByPacket(
+    input.incomingExecutionEvents,
+    packetIds,
+  );
   const packetStatusBeforeById = new Map(packets.map((packet) => [packet.packetId, packet.status]));
   const decisions: ReconcileDecision[] = [];
   const logEntries: ExecutionLogEntry[] = [];
@@ -533,7 +567,7 @@ export async function runReconcilerStub(
 
     const incomingSessionIds = resolveIncomingExecutionSessionIds({
       packet,
-      incomingEvents: input.incomingExecutionEvents,
+      incomingSessionIdsByPacket,
       fallbackSessionId: normalizeSessionId(session.id),
     });
     const incomingIdentity = resolveIncomingSessionIdentity({

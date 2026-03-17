@@ -168,11 +168,13 @@ export async function runSingleCycle(
     ? await dependencies.reconcileRunner({
         planId: planState.planId,
         packetFile: packetFilePath,
+        incomingExecutionEvents: input.incomingExecutionEvents,
       })
     : await runReconcilerStub(
         {
           planId: planState.planId,
           packetFile: packetFilePath,
+          incomingExecutionEvents: input.incomingExecutionEvents,
         },
         { stateRoot },
       );

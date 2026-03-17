@@ -7,7 +7,11 @@ import test from 'node:test';
 import { runSingleCycle } from './single-cycle-runner.js';
 import type { DispatchResult, DispatcherInput } from '../types/dispatcher.js';
 import type { PlannerOutput } from '../types/planner.js';
-import type { ReconcileResult, ReconcilerInput } from '../types/reconciler.js';
+import type {
+  ReconcileResult,
+  ReconcilerExecutionEvent,
+  ReconcilerInput,
+} from '../types/reconciler.js';
 import type { PlanState } from '../types/plan-state.js';
 import type { TaskPacket } from '../types/task-packet.js';
 
@@ -146,6 +150,39 @@ test('single-cycle reports no_ready_packets when nothing can run', async () => {
 
     assert.equal(result.stopReason, 'no_ready_packets');
     assert.equal(result.operatorState, 'progressing');
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('single-cycle forwards incoming execution events to reconciler input', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'single-cycle-forward-incoming-events-'));
+  const stateRoot = join(rootDir, 'state');
+  const incomingExecutionEvents: ReconcilerExecutionEvent[] = [
+    { packetId: 'packet-1', sessionId: 'session-1' },
+  ];
+
+  let reconcileInputEvents: ReconcilerExecutionEvent[] | undefined;
+
+  try {
+    await runSingleCycle(
+      { goal: 'Forward incoming events', incomingExecutionEvents },
+      {
+        stateRoot,
+        now: () => FIXED_TIME,
+        dispatchRunner: async (input) => createDispatchResult(input, 0),
+        reconcileRunner: async (input) => {
+          reconcileInputEvents = input.incomingExecutionEvents;
+          return createReconcileResult(input, stateRoot, {
+            completedCount: 0,
+            unlockedCount: 0,
+            planCompleted: false,
+          });
+        },
+      },
+    );
+
+    assert.deepEqual(reconcileInputEvents, incomingExecutionEvents);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }
