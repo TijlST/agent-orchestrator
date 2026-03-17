@@ -6,6 +6,12 @@ export interface ReconcilerInput {
   packetFile?: string;
   actor?: string;
   timestamp?: string;
+  incomingExecutionEvents?: ReconcilerExecutionEvent[];
+}
+
+export interface ReconcilerExecutionEvent {
+  packetId?: string;
+  sessionId?: string;
 }
 
 export interface ReconcileDecision {

@@ -216,6 +216,7 @@ test('waiting packet with matching packet.sessionId and expectedSessionId comple
         planId,
         packetFile: fixture.packetFilePath,
         timestamp: FIXED_TIME,
+        incomingExecutionEvents: [{ packetId: 'packet-matching', sessionId }],
       },
       {
         stateRoot: fixture.stateRoot,
@@ -303,16 +304,17 @@ test('waiting packet with mismatched packet.sessionId and expectedSessionId stay
   }
 });
 
-test('waiting packet with only completionCriteria.expectedSessionId uses it as lookup fallback', async () => {
-  const planId = 'plan-expected-fallback-complete';
-  const marker = 'CONTROL_LAYER_DONE:packet-expected';
-  const expectedSessionId = 'session-expected';
+test('waiting packet ignores completion when incoming event sessionId mismatches packet.sessionId', async () => {
+  const planId = 'plan-incoming-mismatch-packet-session';
+  const marker = 'CONTROL_LAYER_DONE:packet-incoming-mismatch-packet';
+  const sessionId = 'session-packet';
   const packet = createPacket({
-    packetId: 'packet-expected',
+    packetId: 'packet-incoming-mismatch-packet',
     planId,
+    sessionId,
     status: 'waiting',
     payload: { completionMarker: marker },
-    completionCriteria: { expectedSessionId },
+    completionCriteria: { expectedSessionId: sessionId },
   });
   const fixture = await setupFixture(planId, [packet]);
 
@@ -322,36 +324,49 @@ test('waiting packet with only completionCriteria.expectedSessionId uses it as l
         planId,
         packetFile: fixture.packetFilePath,
         timestamp: FIXED_TIME,
+        incomingExecutionEvents: [
+          { packetId: 'packet-incoming-mismatch-packet', sessionId: 'session-other' },
+        ],
       },
       {
         stateRoot: fixture.stateRoot,
         createSessionManager: async () => ({
-          get: async (id: string) => (id === expectedSessionId ? createSession(id) : null),
+          get: async (id: string) => (id === sessionId ? createSession(id) : null),
         }),
-        capturePane: async () => `${marker}\n${marker}`,
+        capturePane: async () => {
+          throw new Error('capturePane should not be called when incoming session mismatches');
+        },
       },
     );
 
     const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
-    assert.equal(updatedPackets[0]?.status, 'completed');
-    assert.equal(updatedPackets[0]?.sessionId, undefined);
-    assert.equal(result.completedCount, 1);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(result.completedCount, 0);
+    assert.equal(
+      result.decisions.some(
+        (decision) =>
+          decision.kind === 'packet_blocked' &&
+          decision.packetId === 'packet-incoming-mismatch-packet' &&
+          decision.reason === 'session_identity_mismatch',
+      ),
+      true,
+    );
   } finally {
     await rm(fixture.rootDir, { recursive: true, force: true });
   }
 });
 
-test('waiting packet with only packet.sessionId present completes normally', async () => {
-  const planId = 'plan-packet-session-only';
-  const marker = 'CONTROL_LAYER_DONE:packet-session-only';
-  const sessionId = 'session-only';
+test('waiting packet ignores completion when incoming event sessionId mismatches completionCriteria.expectedSessionId', async () => {
+  const planId = 'plan-incoming-mismatch-expected-session';
+  const marker = 'CONTROL_LAYER_DONE:packet-incoming-mismatch-expected';
+  const sessionId = 'session-expected';
   const packet = createPacket({
-    packetId: 'packet-session-only',
+    packetId: 'packet-incoming-mismatch-expected',
     planId,
     sessionId,
     status: 'waiting',
     payload: { completionMarker: marker },
-    completionCriteria: {},
+    completionCriteria: { expectedSessionId: sessionId },
   });
   const fixture = await setupFixture(planId, [packet]);
 
@@ -361,6 +376,113 @@ test('waiting packet with only packet.sessionId present completes normally', asy
         planId,
         packetFile: fixture.packetFilePath,
         timestamp: FIXED_TIME,
+        incomingExecutionEvents: [
+          { packetId: 'packet-incoming-mismatch-expected', sessionId: 'session-other' },
+        ],
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async (id: string) => (id === sessionId ? createSession(id) : null),
+        }),
+        capturePane: async () => {
+          throw new Error('capturePane should not be called when incoming session mismatches');
+        },
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(result.completedCount, 0);
+    assert.equal(
+      result.decisions.some(
+        (decision) =>
+          decision.kind === 'packet_blocked' &&
+          decision.packetId === 'packet-incoming-mismatch-expected' &&
+          decision.reason === 'session_identity_mismatch',
+      ),
+      true,
+    );
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('waiting packet with missing incoming event sessionId stays waiting', async () => {
+  const planId = 'plan-missing-incoming-session';
+  const marker = 'CONTROL_LAYER_DONE:packet-missing-incoming';
+  const sessionId = 'session-missing-incoming';
+  const packet = createPacket({
+    packetId: 'packet-missing-incoming',
+    planId,
+    sessionId,
+    status: 'waiting',
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+        incomingExecutionEvents: [{ packetId: 'packet-missing-incoming', sessionId: '   ' }],
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async (id: string) => (id === sessionId ? createSession(id) : null),
+        }),
+        capturePane: async () => {
+          throw new Error('capturePane should not be called when incoming session is missing');
+        },
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'waiting');
+    assert.equal(result.completedCount, 0);
+    assert.equal(
+      result.decisions.some(
+        (decision) =>
+          decision.kind === 'packet_blocked' &&
+          decision.packetId === 'packet-missing-incoming' &&
+          decision.reason === 'missing_session_identity',
+      ),
+      true,
+    );
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('waiting packet with multiple candidate incoming events accepts only the exact sessionId match', async () => {
+  const planId = 'plan-multiple-incoming-candidates';
+  const marker = 'CONTROL_LAYER_DONE:packet-multi-candidate';
+  const sessionId = 'session-multi-candidate';
+  const packet = createPacket({
+    packetId: 'packet-multi-candidate',
+    planId,
+    sessionId,
+    status: 'waiting',
+    payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
+  });
+  const fixture = await setupFixture(planId, [packet]);
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+        incomingExecutionEvents: [
+          { packetId: 'packet-multi-candidate', sessionId: 'session-wrong-a' },
+          { packetId: 'packet-multi-candidate', sessionId },
+          { packetId: 'packet-multi-candidate', sessionId: 'session-wrong-b' },
+        ],
       },
       {
         stateRoot: fixture.stateRoot,
@@ -479,6 +601,7 @@ test('waiting packet with a single completion marker occurrence stays waiting', 
     sessionId,
     status: 'waiting',
     payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
   });
   const fixture = await setupFixture(planId, [packet]);
 
@@ -516,6 +639,7 @@ test('needs-input session with retry remaining requeues waiting packet to ready 
     sessionId,
     status: 'waiting',
     attempt: 0,
+    completionCriteria: { expectedSessionId: sessionId },
     retryPolicy: {
       maxAttempts: 1,
       backoffMsBase: 1000,
@@ -573,6 +697,48 @@ test('needs-input session with retry remaining requeues waiting packet to ready 
   }
 });
 
+test('needs-input session with missing retryPolicy does not crash and requeues using default maxAttempts', async () => {
+  const planId = 'plan-needs-input-missing-retry-policy';
+  const sessionId = 'session-needs-input-missing-retry-policy';
+  const packet = {
+    ...createPacket({
+      packetId: 'packet-needs-input-missing-retry-policy',
+      planId,
+      sessionId,
+      status: 'waiting',
+      attempt: 0,
+      completionCriteria: { expectedSessionId: sessionId },
+    }),
+    retryPolicy: undefined,
+  } as unknown as TaskPacket;
+  const fixture = await setupFixture(planId, [packet]);
+
+  try {
+    const result = await runReconcilerStub(
+      {
+        planId,
+        packetFile: fixture.packetFilePath,
+        timestamp: FIXED_TIME,
+      },
+      {
+        stateRoot: fixture.stateRoot,
+        createSessionManager: async () => ({
+          get: async () => createSession(sessionId, { status: 'needs_input' }),
+        }),
+      },
+    );
+
+    const updatedPackets = await readJsonFile<TaskPacket[]>(fixture.packetFilePath);
+    assert.equal(updatedPackets[0]?.status, 'ready');
+    assert.equal(updatedPackets[0]?.attempt, 1);
+    assert.equal(updatedPackets[0]?.lastErrorCode, 'ao_session_needs_input');
+    assert.equal(result.requeuedCount, 1);
+    assert.equal(result.failedCount, 0);
+  } finally {
+    await rm(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
 test('errored session with no retries remaining moves packet to failed', async () => {
   const planId = 'plan-errored-exhausted';
   const sessionId = 'session-errored-exhausted';
@@ -582,6 +748,7 @@ test('errored session with no retries remaining moves packet to failed', async (
     sessionId,
     status: 'waiting',
     attempt: 1,
+    completionCriteria: { expectedSessionId: sessionId },
     retryPolicy: {
       maxAttempts: 1,
       backoffMsBase: 1000,
@@ -649,6 +816,7 @@ test('terminal session without repeated completion marker requeues when retry re
     status: 'waiting',
     attempt: 0,
     payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
     retryPolicy: {
       maxAttempts: 1,
       backoffMsBase: 1000,
@@ -704,6 +872,7 @@ test('terminal session without repeated completion marker fails when retries are
     status: 'waiting',
     attempt: 1,
     payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
     retryPolicy: {
       maxAttempts: 1,
       backoffMsBase: 1000,
@@ -871,6 +1040,7 @@ test('queued dependent packet does not unlock when dependency fails terminally',
     sessionId,
     attempt: 1,
     payload: { completionMarker: marker },
+    completionCriteria: { expectedSessionId: sessionId },
     retryPolicy: {
       maxAttempts: 1,
       backoffMsBase: 1000,
