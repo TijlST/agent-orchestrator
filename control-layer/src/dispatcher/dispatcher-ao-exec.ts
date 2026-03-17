@@ -31,6 +31,11 @@ interface AoExecDispatcherDeps {
   createSessionManager?: () => Promise<OpenCodeSessionManager>;
 }
 
+type MutableTaskPacket = TaskPacket & {
+  dependencies?: unknown;
+  completionCriteria?: unknown;
+};
+
 function resolveControlLayerRoot(): string {
   const currentFilePath = fileURLToPath(import.meta.url);
   const currentDir = dirname(currentFilePath);
@@ -55,6 +60,22 @@ function resolveStatePaths(input: DispatcherInput): {
 
 function resolveDispatchFilePath(planId: string): string {
   return resolve(resolveControlLayerRoot(), 'state', 'dispatches', `${planId}.json`);
+}
+
+function normalizePacketRuntimeDefaults(packet: TaskPacket): void {
+  const mutablePacket = packet as MutableTaskPacket;
+
+  if (!Array.isArray(mutablePacket.dependencies)) {
+    mutablePacket.dependencies = [];
+  }
+
+  if (
+    typeof mutablePacket.completionCriteria !== 'object' ||
+    mutablePacket.completionCriteria === null ||
+    Array.isArray(mutablePacket.completionCriteria)
+  ) {
+    mutablePacket.completionCriteria = {};
+  }
 }
 
 function areDependenciesSatisfied(packet: TaskPacket, packetsById: Map<string, TaskPacket>): boolean {
@@ -390,6 +411,8 @@ export async function runDispatcherAoExec(
   let sessionManager: OpenCodeSessionManager | null = null;
 
   for (const packet of packets) {
+    normalizePacketRuntimeDefaults(packet);
+
     let skippedReason: DispatchDecisionReason | null = null;
     if (packet.status === 'queued' && !areDependenciesSatisfied(packet, packetsById)) {
       skippedReason = 'skipped_dependency_not_satisfied';

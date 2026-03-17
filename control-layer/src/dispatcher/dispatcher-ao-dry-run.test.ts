@@ -427,3 +427,37 @@ test('ao-exec skips ready packet when dispatch capacity is exhausted', async () 
   assert.equal(persistedPackets[0]?.status, 'waiting');
   assert.equal(persistedPackets[1]?.status, 'ready');
 });
+
+test('ao-exec handles packet missing dependencies by treating them as empty and dispatching', async () => {
+  const planId = 'plan-ao-exec-missing-dependencies';
+  const packet = {
+    ...createPacket({
+      planId,
+      packetId: 'packet-minimal-shape',
+      sessionId: undefined,
+      completionCriteria: {},
+    }),
+    dependencies: undefined,
+  } as unknown as TaskPacket;
+
+  const { result, persistedPackets, spawnCalls, sendCalls } = await runAoExecWithPackets(planId, [packet]);
+
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(sendCalls.length, 0);
+  assert.equal(result.dispatchedCount, 1);
+  assert.equal(result.skippedCount, 0);
+  assert.equal(result.decisions[0]?.reason, 'dispatched_to_session');
+  assert.equal(result.decisions[0]?.toStatus, 'waiting');
+  assert.equal(result.decisions[0]?.outcome, 'dispatched');
+  assert.equal(result.packets[0]?.sessionId, 'spawned-session-1');
+  assert.equal(result.packets[0]?.completionCriteria.expectedSessionId, 'spawned-session-1');
+  assert.deepEqual(result.packets[0]?.dependencies, []);
+  assert.equal(result.packets[0]?.lastErrorCode, undefined);
+  assert.equal(result.packets[0]?.lastErrorMessage, undefined);
+  assert.equal(persistedPackets[0]?.sessionId, 'spawned-session-1');
+  assert.equal(persistedPackets[0]?.completionCriteria.expectedSessionId, 'spawned-session-1');
+  assert.equal(persistedPackets[0]?.status, 'waiting');
+  assert.deepEqual(persistedPackets[0]?.dependencies, []);
+  assert.equal(persistedPackets[0]?.lastErrorCode, undefined);
+  assert.equal(persistedPackets[0]?.lastErrorMessage, undefined);
+});
