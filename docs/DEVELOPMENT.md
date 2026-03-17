@@ -23,7 +23,7 @@ Every abstraction is a swappable plugin. All interfaces are defined in [`package
 | Slot      | Interface   | Default       | Alternatives                             |
 | --------- | ----------- | ------------- | ---------------------------------------- |
 | Runtime   | `Runtime`   | `tmux`        | `process`, `docker`, `k8s`, `ssh`, `e2b` |
-| Agent     | `Agent`     | `claude-code` | `codex`, `aider`, `opencode`             |
+| Agent     | `Agent`     | `codex`       | `claude-code`, `aider`, `opencode`       |
 | Workspace | `Workspace` | `worktree`    | `clone`                                  |
 | Tracker   | `Tracker`   | `github`      | `linear`                                 |
 | SCM       | `SCM`       | `github`      | —                                        |

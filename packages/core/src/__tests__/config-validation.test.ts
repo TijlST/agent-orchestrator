@@ -482,6 +482,56 @@ describe("Config Schema Validation", () => {
 });
 
 describe("Config Defaults", () => {
+  it("defaults agent to codex when defaults.agent is omitted", () => {
+    const validated = validateConfig({
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+        },
+      },
+    });
+
+    expect(validated.defaults.agent).toBe("codex");
+  });
+
+  it("defaults decomposer reviewerAgent to codex", () => {
+    const validated = validateConfig({
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+          decomposer: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    expect(validated.projects.proj1.decomposer?.provider).toBe("openai");
+    expect(validated.projects.proj1.decomposer?.reviewerAgent).toBe("codex");
+  });
+
+  it("accepts explicit decomposer provider override", () => {
+    const validated = validateConfig({
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+          decomposer: {
+            enabled: true,
+            provider: "anthropic",
+          },
+        },
+      },
+    });
+
+    expect(validated.projects.proj1.decomposer?.provider).toBe("anthropic");
+  });
+
   it("applies default session prefix from project ID", () => {
     const config = {
       projects: {

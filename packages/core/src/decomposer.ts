@@ -47,8 +47,12 @@ export interface DecomposerConfig {
   enabled: boolean;
   /** Max recursion depth (default: 3) */
   maxDepth: number;
-  /** Model to use for decomposition (default: claude-sonnet-4-20250514) */
+  /** Model to use for decomposition (default: gpt-5) */
   model: string;
+  /** LLM provider used for decomposition (default: openai) */
+  provider: "openai" | "anthropic";
+  /** Reviewer agent for planning-review checkpoint (default: codex) */
+  reviewerAgent: string;
   /** Require human approval before executing decomposed plans (default: true) */
   requireApproval: boolean;
 }
@@ -56,7 +60,9 @@ export interface DecomposerConfig {
 export const DEFAULT_DECOMPOSER_CONFIG: DecomposerConfig = {
   enabled: false,
   maxDepth: 3,
-  model: "claude-sonnet-4-20250514",
+  model: "gpt-5",
+  provider: "openai",
+  reviewerAgent: "codex",
   requireApproval: true,
 };
 
@@ -111,39 +117,133 @@ Respond with a JSON array of strings, each being a subtask description. Example:
 
 Nothing else — just the JSON array.`;
 
+export interface DecompositionProvider {
+  complete(input: {
+    model: string;
+    system: string;
+    user: string;
+    maxTokens: number;
+  }): Promise<string>;
+}
+
+class OpenAIResponsesDecompositionProvider implements DecompositionProvider {
+  async complete(input: {
+    model: string;
+    system: string;
+    user: string;
+    maxTokens: number;
+  }): Promise<string> {
+    const apiKey = process.env["OPENAI_API_KEY"];
+    if (!apiKey) {
+      throw new Error("OPENAI_API_KEY is required for OpenAI decomposition provider");
+    }
+
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: input.model,
+        max_output_tokens: input.maxTokens,
+        input: [
+          { role: "system", content: input.system },
+          { role: "user", content: input.user },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI decomposition request failed (${response.status})`);
+    }
+
+    const payload = (await response.json()) as {
+      output_text?: string;
+      output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+    };
+
+    if (typeof payload.output_text === "string" && payload.output_text.trim().length > 0) {
+      return payload.output_text.trim();
+    }
+
+    const text = payload.output
+      ?.flatMap((item) => item.content ?? [])
+      .filter((part) => part.type === "output_text" && typeof part.text === "string")
+      .map((part) => part.text?.trim() ?? "")
+      .join("\n")
+      .trim();
+
+    if (!text) {
+      throw new Error("OpenAI decomposition response did not contain text output");
+    }
+
+    return text;
+  }
+}
+
+class AnthropicDecompositionProvider implements DecompositionProvider {
+  async complete(input: {
+    model: string;
+    system: string;
+    user: string;
+    maxTokens: number;
+  }): Promise<string> {
+    const client = new Anthropic();
+    const res = await client.messages.create({
+      model: input.model,
+      max_tokens: input.maxTokens,
+      system: input.system,
+      messages: [{ role: "user", content: input.user }],
+    });
+    return res.content[0].type === "text" ? res.content[0].text.trim() : "";
+  }
+}
+
+export function resolveDecomposerProvider(config: DecomposerConfig): "openai" | "anthropic" {
+  if (config.provider) return config.provider;
+
+  // Backward-compatible model heuristic for configs predating provider field.
+  return config.model.toLowerCase().includes("claude") ? "anthropic" : "openai";
+}
+
+function createDecompositionProvider(config: DecomposerConfig): DecompositionProvider {
+  const provider = resolveDecomposerProvider(config);
+  return provider === "anthropic"
+    ? new AnthropicDecompositionProvider()
+    : new OpenAIResponsesDecompositionProvider();
+}
+
 async function classifyTask(
-  client: Anthropic,
+  provider: DecompositionProvider,
   model: string,
   task: string,
   lineage: string[],
 ): Promise<TaskKind> {
   const context = formatLineage(lineage, task);
-  const res = await client.messages.create({
+  const text = await provider.complete({
     model,
-    max_tokens: 10,
+    maxTokens: 10,
     system: CLASSIFY_SYSTEM,
-    messages: [{ role: "user", content: `Task hierarchy:\n${context}` }],
+    user: `Task hierarchy:\n${context}`,
   });
-
-  const text = res.content[0].type === "text" ? res.content[0].text.trim().toLowerCase() : "";
-  return text === "composite" ? "composite" : "atomic";
+  return text.trim().toLowerCase() === "composite" ? "composite" : "atomic";
 }
 
 async function decomposeTask(
-  client: Anthropic,
+  provider: DecompositionProvider,
   model: string,
   task: string,
   lineage: string[],
 ): Promise<string[]> {
   const context = formatLineage(lineage, task);
-  const res = await client.messages.create({
+  const text = await provider.complete({
     model,
-    max_tokens: 1024,
+    maxTokens: 1024,
     system: DECOMPOSE_SYSTEM,
-    messages: [{ role: "user", content: `Task hierarchy:\n${context}` }],
+    user: `Task hierarchy:\n${context}`,
   });
 
-  const text = res.content[0].type === "text" ? res.content[0].text.trim() : "[]";
   const jsonMatch = text.match(/\[[\s\S]*\]/);
   if (!jsonMatch) {
     throw new Error(`Decomposition failed — no JSON array in response: ${text}`);
@@ -172,12 +272,15 @@ function createTaskNode(
 
 /** Recursively decompose a task tree (planning phase — no execution). */
 async function planTree(
-  client: Anthropic,
+  provider: DecompositionProvider,
   model: string,
   task: TaskNode,
   maxDepth: number,
 ): Promise<TaskNode> {
-  const kind = task.depth >= maxDepth ? "atomic" : await classifyTask(client, model, task.description, task.lineage);
+  const kind =
+    task.depth >= maxDepth
+      ? "atomic"
+      : await classifyTask(provider, model, task.description, task.lineage);
 
   task.kind = kind;
 
@@ -187,7 +290,7 @@ async function planTree(
   }
 
   task.status = "decomposing";
-  const subtaskDescriptions = await decomposeTask(client, model, task.description, task.lineage);
+  const subtaskDescriptions = await decomposeTask(provider, model, task.description, task.lineage);
 
   const childLineage = [...task.lineage, task.description];
   task.children = subtaskDescriptions.map((desc, i) =>
@@ -195,7 +298,7 @@ async function planTree(
   );
 
   // Recurse on children concurrently
-  await Promise.all(task.children.map((child) => planTree(client, model, child, maxDepth)));
+  await Promise.all(task.children.map((child) => planTree(provider, model, child, maxDepth)));
 
   task.status = "ready";
   return task;
@@ -209,11 +312,12 @@ async function planTree(
 export async function decompose(
   taskDescription: string,
   config: DecomposerConfig = DEFAULT_DECOMPOSER_CONFIG,
+  deps?: { provider?: DecompositionProvider },
 ): Promise<DecompositionPlan> {
-  const client = new Anthropic();
+  const provider = deps?.provider ?? createDecompositionProvider(config);
   const tree = createTaskNode("1", taskDescription, 0, []);
 
-  await planTree(client, config.model, tree, config.maxDepth);
+  await planTree(provider, config.model, tree, config.maxDepth);
 
   return {
     id: `plan-${Date.now()}`,

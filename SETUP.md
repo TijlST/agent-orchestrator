@@ -129,7 +129,7 @@ The wizard will prompt you for:
 2. **Worktree directory** - Where to create isolated workspaces (default: `~/.worktrees`)
 3. **Dashboard port** - Web interface port (default: `3000`)
 4. **Runtime plugin** - Session runtime (default: `tmux`)
-5. **Agent plugin** - AI coding assistant (default: `claude-code`)
+5. **Agent plugin** - AI coding assistant (default: `codex`)
 6. **Workspace plugin** - Workspace isolation method (default: `worktree`)
 7. **Notifiers** - Notification channels (default: `desktop`)
 8. **Project ID** - Short name for your project
@@ -193,7 +193,7 @@ Agent Orchestrator has 8 plugin slots. All are swappable:
 | Slot          | Purpose              | Default       | Alternatives                                    |
 | ------------- | -------------------- | ------------- | ----------------------------------------------- |
 | **Runtime**   | How sessions run     | `tmux`        | `process`, `docker`, `kubernetes`, `ssh`, `e2b` |
-| **Agent**     | AI coding assistant  | `claude-code` | `codex`, `aider`, `goose`, custom               |
+| **Agent**     | AI coding assistant  | `codex`       | `claude-code`, `aider`, `goose`, custom               |
 | **Workspace** | Workspace isolation  | `worktree`    | `clone`, `copy`                                 |
 | **Tracker**   | Issue tracking       | `github`      | `linear`, `jira`, custom                        |
 | **SCM**       | Source control       | `github`      | GitLab, Bitbucket (future)                      |
@@ -289,12 +289,23 @@ Override defaults per project:
 projects:
   frontend:
     runtime: tmux
-    agent: claude-code
+    agent: codex
     workspace: worktree
 
   backend:
     runtime: docker # Use Docker for backend
-    agent: codex # Use Codex instead of Claude
+    agent: claude-code # Explicit override to Claude Code
+```
+
+For decomposition planning-review checkpoints, the reviewer defaults to `codex`. Override only when needed:
+
+```yaml
+projects:
+  my-app:
+    decomposer:
+      enabled: true
+      provider: openai
+      reviewerAgent: claude-code # explicit multimodal override
 ```
 
 ## Integration Guides

@@ -18,9 +18,9 @@ port: 3000
 # Default plugins (these are the defaults — you can omit this section)
 defaults:
   runtime: tmux           # tmux | process | docker | kubernetes | ssh | e2b
-  agent: claude-code      # claude-code | codex | aider | goose | custom
+  agent: codex            # codex | claude-code | aider | goose | custom
   # orchestrator:
-  #   agent: claude-code
+  #   agent: codex
   # worker:
   #   agent: codex
   workspace: worktree     # worktree | clone | copy
@@ -65,9 +65,9 @@ projects:
 
     # Optional role-specific agent overrides
     # orchestrator:
-    #   agent: claude-code
+    #   agent: codex
     #   agentConfig:
-    #     model: claude-sonnet-4-5
+    #     model: gpt-5-codex
     # worker:
     #   agent: codex
     #   agentConfig:
@@ -92,6 +92,13 @@ projects:
     # reactions:
     #   approved-and-green:
     #     auto: true         # enable auto-merge for this project
+
+    # Planning-review checkpoint (for decomposition approval flow)
+    # decomposer:
+    #   enabled: true
+    #   provider: openai      # openai (default) | anthropic
+    #   model: gpt-5
+    #   reviewerAgent: codex   # optional override (e.g. claude-code, gemini)
 
 # Notification channels
 # notifiers:

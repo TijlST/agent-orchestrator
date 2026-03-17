@@ -132,13 +132,17 @@ const DecomposerConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
     maxDepth: z.number().min(1).max(5).default(3),
-    model: z.string().default("claude-sonnet-4-20250514"),
+    model: z.string().default("gpt-5"),
+    provider: z.enum(["openai", "anthropic"]).default("openai"),
+    reviewerAgent: z.string().default("codex"),
     requireApproval: z.boolean().default(true),
   })
   .default({
     enabled: false,
     maxDepth: 3,
-    model: "claude-sonnet-4-20250514",
+    model: "gpt-5",
+    provider: "openai",
+    reviewerAgent: "codex",
     requireApproval: true,
   });
 
@@ -174,7 +178,7 @@ const ProjectConfigSchema = z.object({
 
 const DefaultPluginsSchema = z.object({
   runtime: z.string().default("tmux"),
-  agent: z.string().default("claude-code"),
+  agent: z.string().default("codex"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default(["composio", "desktop"]),
   orchestrator: RoleAgentDefaultsSchema,

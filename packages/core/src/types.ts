@@ -1004,8 +1004,12 @@ export interface ProjectConfig {
     enabled: boolean;
     /** Max recursion depth (default: 3) */
     maxDepth: number;
-    /** Model to use for decomposition (default: claude-sonnet-4-20250514) */
+    /** Model to use for decomposition (default: gpt-5) */
     model: string;
+    /** LLM provider for decomposition (default: openai) */
+    provider: "openai" | "anthropic";
+    /** Reviewer agent for planning-review checkpoint (default: codex) */
+    reviewerAgent: string;
     /** Require human approval before executing decomposed plans (default: true) */
     requireApproval: boolean;
   };

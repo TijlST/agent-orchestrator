@@ -65,6 +65,7 @@ export {
   formatSiblings,
   propagateStatus,
   DEFAULT_DECOMPOSER_CONFIG,
+  resolveDecomposerProvider,
 } from "./decomposer.js";
 export type {
   TaskNode,
@@ -72,6 +73,7 @@ export type {
   TaskStatus,
   DecompositionPlan,
   DecomposerConfig,
+  DecompositionProvider,
 } from "./decomposer.js";
 
 // Orchestrator prompt — generates orchestrator context for `ao start`
