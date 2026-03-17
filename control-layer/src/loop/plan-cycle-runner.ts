@@ -34,6 +34,19 @@ function countPacketsWithStatus(
   return statuses.filter((status) => status === targetStatus).length;
 }
 
+function isGovernanceOrDependencyBlocked(dispatchResult: DispatchResult): boolean {
+  if (dispatchResult.dispatchedCount > 0) {
+    return false;
+  }
+
+  const { decisionCounts } = dispatchResult;
+  return (
+    decisionCounts.skipped_dependency_not_satisfied > 0 ||
+    decisionCounts.skipped_risk_or_approval_block > 0 ||
+    decisionCounts.skipped_no_dispatch_capacity > 0
+  );
+}
+
 export async function runPlanCycle(
   input: PlanCycleRunnerInput,
   dependencies: PlanCycleRunnerDependencies = {},
@@ -60,6 +73,34 @@ export async function runPlanCycle(
   const plan = await loadPlanState(planFilePath);
   if (!plan) {
     throw new Error(`Plan state not found for plan id "${planId}": ${planFilePath}`);
+  }
+
+  if (plan.status === 'completed' || plan.status === 'failed' || plan.status === 'escalated') {
+    const packetsAfterTerminal = await readTaskPackets(packetFilePath);
+    const terminalStatuses = packetsAfterTerminal.map((packet) => packet.status);
+    const statusSummary = await getPlanStatusSummary({
+      planId,
+      stateRoot,
+    });
+
+    return {
+      planId,
+      planFilePath,
+      packetFilePath,
+      readyBeforeDispatch: countPacketsWithStatus(terminalStatuses, 'ready'),
+      dispatchedCount: 0,
+      completedCount: 0,
+      unlockedCount: 0,
+      remainingQueued: countPacketsWithStatus(terminalStatuses, 'queued'),
+      remainingReady: countPacketsWithStatus(terminalStatuses, 'ready'),
+      remainingWaiting: countPacketsWithStatus(terminalStatuses, 'waiting'),
+      planCompleted: plan.status === 'completed',
+      stopReason: plan.status === 'completed' ? 'plan_completed' : 'failed_terminal',
+      operatorState: statusSummary.operatorState,
+      packetCounts: statusSummary.counts,
+      latestStopReasons: statusSummary.latestStopReasons,
+      blockingReasons: statusSummary.blockingReasons,
+    };
   }
 
   const packetsBeforeDispatch = await readTaskPackets(packetFilePath);
@@ -91,19 +132,27 @@ export async function runPlanCycle(
   const packetsAfterCycle = await readTaskPackets(packetFilePath);
   const remainingStatuses = packetsAfterCycle.map((packet) => packet.status);
 
-  let stopReason: CycleProgressReason = 'no_ready_packets';
-  if (reconcileResult.planCompleted) {
-    stopReason = 'plan_completed';
-  } else if (reconcileResult.completedCount > 0 || reconcileResult.unlockedCount > 0) {
-    stopReason = 'reconciled_progress';
-  } else if (dispatchResult.dispatchedCount > 0) {
-    stopReason = 'dispatched_packets';
-  }
-
   const statusSummary = await getPlanStatusSummary({
     planId,
     stateRoot,
   });
+  let stopReason: CycleProgressReason = 'no_ready_packets';
+  if (reconcileResult.planCompleted) {
+    stopReason = 'plan_completed';
+  } else if (statusSummary.operatorState === 'failed_terminal') {
+    stopReason = 'failed_terminal';
+  } else if (reconcileResult.completedCount > 0 || reconcileResult.unlockedCount > 0) {
+    stopReason = 'reconciled_progress';
+  } else if (dispatchResult.dispatchedCount > 0) {
+    stopReason = 'dispatched_packets';
+  } else if (statusSummary.operatorState === 'blocked_waiting') {
+    stopReason = 'blocked_waiting';
+  } else if (
+    statusSummary.operatorState === 'blocked_governance_or_dependencies' ||
+    isGovernanceOrDependencyBlocked(dispatchResult)
+  ) {
+    stopReason = 'blocked_governance_or_dependencies';
+  }
 
   return {
     planId,
@@ -121,5 +170,6 @@ export async function runPlanCycle(
     operatorState: statusSummary.operatorState,
     packetCounts: statusSummary.counts,
     latestStopReasons: statusSummary.latestStopReasons,
+    blockingReasons: statusSummary.blockingReasons,
   };
 }

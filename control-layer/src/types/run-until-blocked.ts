@@ -30,4 +30,5 @@ export interface RunUntilBlockedResult {
   operatorState: OperatorPlanState;
   packetCounts: PlanStatusCounts;
   latestStopReasons: PlanStatusLatestReasons;
+  blockingReasons: string[];
 }

@@ -6,7 +6,10 @@ import test from 'node:test';
 
 import { runSingleCycle } from './single-cycle-runner.js';
 import type { DispatchResult, DispatcherInput } from '../types/dispatcher.js';
+import type { PlannerOutput } from '../types/planner.js';
 import type { ReconcileResult, ReconcilerInput } from '../types/reconciler.js';
+import type { PlanState } from '../types/plan-state.js';
+import type { TaskPacket } from '../types/task-packet.js';
 
 const FIXED_TIME = '2026-03-16T12:00:00.000Z';
 
@@ -61,6 +64,63 @@ function createReconcileResult(
     },
     decisions: [],
     ...overrides,
+  };
+}
+
+function createPacket(overrides: Partial<TaskPacket>): TaskPacket {
+  const packetId = overrides.packetId ?? 'packet-1';
+  const planId = overrides.planId ?? 'plan-1';
+
+  return {
+    packetId,
+    planId,
+    projectId: 'proj-1',
+    idempotencyKey: `${packetId}-idem`,
+    correlationId: `${packetId}-corr`,
+    action: 'send_instruction',
+    payload: {},
+    dependencies: [],
+    riskTier: 'read_only',
+    approvalState: 'not_required',
+    status: 'queued',
+    attempt: 0,
+    retryPolicy: {
+      maxAttempts: 1,
+      backoffMsBase: 1000,
+      backoffMultiplier: 1,
+      maxBackoffMs: 1000,
+      retryOn: [],
+    },
+    completionCriteria: {},
+    createdBy: 'test',
+    createdAt: FIXED_TIME,
+    updatedAt: FIXED_TIME,
+    ...overrides,
+  };
+}
+
+function createPlannerOutput(planId: string, packets: TaskPacket[]): PlannerOutput {
+  const planState: PlanState = {
+    planId,
+    goal: 'test goal',
+    projectId: 'proj-1',
+    status: 'active',
+    packetIds: packets.map((packet) => packet.packetId),
+    openPacketIds: packets
+      .filter((packet) => packet.status !== 'completed' && packet.status !== 'cancelled')
+      .map((packet) => packet.packetId),
+    completedPacketIds: packets
+      .filter((packet) => packet.status === 'completed')
+      .map((packet) => packet.packetId),
+    retryBudgetRemaining: 3,
+    createdAt: FIXED_TIME,
+    updatedAt: FIXED_TIME,
+  };
+
+  return {
+    planState,
+    tasks: [],
+    packets,
   };
 }
 
@@ -213,6 +273,81 @@ test('single-cycle reports reconciled_progress when reconcile changes packet sta
     );
 
     assert.equal(result.stopReason, 'reconciled_progress');
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('single-cycle reports blocked_waiting when only waiting packets remain', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'single-cycle-blocked-waiting-'));
+  const stateRoot = join(rootDir, 'state');
+
+  try {
+    const result = await runSingleCycle(
+      { goal: 'Waiting-only cycle' },
+      {
+        stateRoot,
+        now: () => FIXED_TIME,
+        planner: () =>
+          createPlannerOutput('plan-waiting-only', [
+            createPacket({ packetId: 'packet-waiting', planId: 'plan-waiting-only', status: 'waiting' }),
+          ]),
+        dispatchRunner: async (input) => createDispatchResult(input, 0),
+        reconcileRunner: async (input) =>
+          createReconcileResult(input, stateRoot, {
+            completedCount: 0,
+            unlockedCount: 0,
+            planCompleted: false,
+          }),
+      },
+    );
+
+    assert.equal(result.stopReason, 'blocked_waiting');
+    assert.equal(result.operatorState, 'blocked_waiting');
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('single-cycle reports blocked_governance_or_dependencies when dispatch is skipped by dependency/governance/capacity', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'single-cycle-blocked-governance-'));
+  const stateRoot = join(rootDir, 'state');
+
+  try {
+    const result = await runSingleCycle(
+      { goal: 'Blocked by dependency' },
+      {
+        stateRoot,
+        now: () => FIXED_TIME,
+        planner: () =>
+          createPlannerOutput('plan-blocked-governance', [
+            createPacket({ packetId: 'packet-queued', planId: 'plan-blocked-governance', status: 'queued' }),
+          ]),
+        dispatchRunner: async (input) => ({
+          ...createDispatchResult(input, 0),
+          evaluatedCount: 1,
+          skippedCount: 1,
+          decisionCounts: {
+            dispatched_to_session: 0,
+            dry_run_marked_only: 0,
+            dry_run_simulated_dispatch: 0,
+            skipped_not_ready: 0,
+            skipped_already_has_session: 0,
+            skipped_dependency_not_satisfied: 1,
+            skipped_risk_or_approval_block: 0,
+            skipped_no_dispatch_capacity: 0,
+          },
+        }),
+        reconcileRunner: async (input) =>
+          createReconcileResult(input, stateRoot, {
+            completedCount: 0,
+            unlockedCount: 0,
+            planCompleted: false,
+          }),
+      },
+    );
+
+    assert.equal(result.stopReason, 'blocked_governance_or_dependencies');
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

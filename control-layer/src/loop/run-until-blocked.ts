@@ -79,6 +79,8 @@ export async function runUntilBlocked(
 
   if (existingPlan.status === 'completed') {
     stopReason = 'plan_completed';
+  } else if (existingPlan.status === 'failed' || existingPlan.status === 'escalated') {
+    stopReason = 'failed_terminal';
   } else {
     const cycleRunner = dependencies.cycleRunner ?? ((runnerInput: { planId: string }) =>
       runPlanCycle(runnerInput, { stateRoot }));
@@ -92,14 +94,36 @@ export async function runUntilBlocked(
       totalCompleted += cycleResult.completedCount;
       totalUnlocked += cycleResult.unlockedCount;
 
-      if (cycleResult.planCompleted) {
+      if (cycleResult.planCompleted || cycleResult.stopReason === 'plan_completed') {
         stopReason = 'plan_completed';
         break;
       }
 
+      if (cycleResult.stopReason === 'failed_terminal') {
+        stopReason = 'failed_terminal';
+        break;
+      }
+
+      if (cycleResult.stopReason === 'blocked_waiting') {
+        stopReason = 'blocked_waiting';
+        break;
+      }
+
+      if (cycleResult.stopReason === 'blocked_governance_or_dependencies') {
+        stopReason = 'blocked_governance_or_dependencies';
+        break;
+      }
+
       if (cycleResult.stopReason === 'no_ready_packets') {
-        stopReason =
-          cycleResult.remainingWaiting > 0 ? 'blocked_waiting' : 'no_ready_packets';
+        if (cycleResult.operatorState === 'blocked_waiting' || cycleResult.remainingWaiting > 0) {
+          stopReason = 'blocked_waiting';
+        } else if (cycleResult.operatorState === 'blocked_governance_or_dependencies') {
+          stopReason = 'blocked_governance_or_dependencies';
+        } else if (cycleResult.operatorState === 'failed_terminal') {
+          stopReason = 'failed_terminal';
+        } else {
+          stopReason = 'no_ready_packets';
+        }
         break;
       }
     }
@@ -113,6 +137,12 @@ export async function runUntilBlocked(
     planId,
     stateRoot,
   });
+  if (stopReason === 'max_iterations_reached' && statusSummary.operatorState === 'failed_terminal') {
+    stopReason = 'failed_terminal';
+  }
+  if (stopReason === 'max_iterations_reached' && statusSummary.operatorState === 'completed') {
+    stopReason = 'plan_completed';
+  }
 
   return {
     planId,
@@ -131,5 +161,6 @@ export async function runUntilBlocked(
     operatorState: statusSummary.operatorState,
     packetCounts: statusSummary.counts,
     latestStopReasons: statusSummary.latestStopReasons,
+    blockingReasons: statusSummary.blockingReasons,
   };
 }

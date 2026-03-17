@@ -15,6 +15,20 @@ import type {
 } from '../types/plan-status.js';
 import type { TaskPacket } from '../types/task-packet.js';
 
+const WAITING_BLOCK_REASONS = new Set<string>([
+  'missing_session_identity',
+  'session_identity_mismatch',
+  'ao_session_lookup_unresolved',
+  'ao_session_needs_input',
+  'stub_waiting_locally_completable',
+]);
+
+const GOVERNANCE_OR_DEPENDENCY_BLOCK_REASONS = new Set<string>([
+  'skipped_dependency_not_satisfied',
+  'skipped_risk_or_approval_block',
+  'skipped_no_dispatch_capacity',
+]);
+
 function resolveControlLayerRoot(): string {
   const currentFilePath = fileURLToPath(import.meta.url);
   const currentDir = dirname(currentFilePath);
@@ -149,12 +163,15 @@ async function readExecutionEntriesForPlan(
 export function classifyOperatorPlanState(input: {
   planStatus: PlanStatusSummary['planStatus'];
   counts: PlanStatusCounts;
+  blockingReasons: string[];
 }): OperatorPlanState {
-  const { planStatus, counts } = input;
-  const noReadyToRun =
-    counts.ready === 0 &&
-    counts.dispatching === 0 &&
-    counts.retry === 0;
+  const { planStatus, counts, blockingReasons } = input;
+  const hasWaitingBlockReason = blockingReasons.some((reason) => WAITING_BLOCK_REASONS.has(reason));
+  const hasGovernanceOrDependencyBlockReason = blockingReasons.some(
+    (reason) => GOVERNANCE_OR_DEPENDENCY_BLOCK_REASONS.has(reason),
+  );
+  const hasActiveExecution = counts.dispatching > 0 || counts.retry > 0;
+  const hasReadyPackets = counts.ready > 0;
 
   if (planStatus === 'completed' || (counts.totalPackets > 0 && counts.completed === counts.totalPackets)) {
     return 'completed';
@@ -164,7 +181,11 @@ export function classifyOperatorPlanState(input: {
     return 'failed_terminal';
   }
 
-  if (!noReadyToRun) {
+  if (hasActiveExecution) {
+    return 'progressing';
+  }
+
+  if (hasReadyPackets && !hasGovernanceOrDependencyBlockReason) {
     return 'progressing';
   }
 
@@ -193,6 +214,14 @@ export function classifyOperatorPlanState(input: {
     return 'blocked_waiting';
   }
 
+  if (counts.waiting > 0 && hasWaitingBlockReason) {
+    return 'blocked_waiting';
+  }
+
+  if (hasGovernanceOrDependencyBlockReason || counts.blocked > 0) {
+    return 'blocked_governance_or_dependencies';
+  }
+
   return 'idle_no_ready';
 }
 
@@ -217,6 +246,7 @@ function buildOperatorSummary(input: {
   latestDispatchOutcome: PlanStatusOutcome | null;
   latestReconcileOutcome: PlanStatusOutcome | null;
   latestStopReasons: PlanStatusLatestReasons;
+  blockingReasons: string[];
 }): PlanStatusSummary['operatorSummary'] {
   return {
     planId: input.planId,
@@ -227,7 +257,28 @@ function buildOperatorSummary(input: {
     latestDispatchOutcome: input.latestDispatchOutcome,
     latestReconcileOutcome: input.latestReconcileOutcome,
     latestStopReasons: input.latestStopReasons,
+    blockingReasons: input.blockingReasons,
   };
+}
+
+function deriveBlockingReasons(input: {
+  latestStopReasons: PlanStatusLatestReasons;
+}): string[] {
+  const reasons = new Set<string>();
+
+  if (input.latestStopReasons.dispatch) {
+    reasons.add(input.latestStopReasons.dispatch);
+  }
+
+  if (input.latestStopReasons.reconcile) {
+    reasons.add(input.latestStopReasons.reconcile);
+  }
+
+  if (input.latestStopReasons.plan) {
+    reasons.add(input.latestStopReasons.plan);
+  }
+
+  return [...reasons].sort();
 }
 
 function sortPackets(planPacketIds: string[], packets: TaskPacket[]): TaskPacket[] {
@@ -314,9 +365,13 @@ export async function getPlanStatusSummary(
     latestReconcileEntry,
     planBlockedReason: plan.blockedReason,
   });
+  const blockingReasons = deriveBlockingReasons({
+    latestStopReasons,
+  });
   const operatorState = classifyOperatorPlanState({
     planStatus: plan.status,
     counts,
+    blockingReasons,
   });
 
   return {
@@ -331,6 +386,7 @@ export async function getPlanStatusSummary(
     latestDispatchOutcome,
     latestReconcileOutcome,
     latestStopReasons,
+    blockingReasons,
     operatorSummary: buildOperatorSummary({
       planId,
       planStatus: plan.status,
@@ -340,6 +396,7 @@ export async function getPlanStatusSummary(
       latestDispatchOutcome,
       latestReconcileOutcome,
       latestStopReasons,
+      blockingReasons,
     }),
     packets: toPacketRows(sortedPackets),
   };

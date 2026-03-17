@@ -30,6 +30,7 @@ export type OperatorPlanState =
   | 'completed'
   | 'progressing'
   | 'blocked_waiting'
+  | 'blocked_governance_or_dependencies'
   | 'failed_terminal'
   | 'idle_no_ready';
 
@@ -57,6 +58,7 @@ export interface PlanStatusOperatorSummary {
   latestDispatchOutcome: PlanStatusOutcome | null;
   latestReconcileOutcome: PlanStatusOutcome | null;
   latestStopReasons: PlanStatusLatestReasons;
+  blockingReasons: string[];
 }
 
 export interface PlanStatusSummary {
@@ -71,6 +73,7 @@ export interface PlanStatusSummary {
   latestDispatchOutcome: PlanStatusOutcome | null;
   latestReconcileOutcome: PlanStatusOutcome | null;
   latestStopReasons: PlanStatusLatestReasons;
+  blockingReasons: string[];
   operatorSummary: PlanStatusOperatorSummary;
   packets: PlanStatusPacketRow[];
 }

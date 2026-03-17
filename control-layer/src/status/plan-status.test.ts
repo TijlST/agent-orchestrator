@@ -184,6 +184,75 @@ test('queued-only plan with no active runner reports idle_no_ready', async () =>
   }
 });
 
+test('queued-only plan with dependency/governance/capacity block reason reports blocked_governance_or_dependencies', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'plan-status-blocked-governance-'));
+  const planId = 'plan-status-blocked-governance';
+  const packets = [createPacket({ planId, packetId: 'packet-queued', status: 'queued' })];
+  const plan = createPlan(planId, packets, 'active');
+  const logs: ExecutionLogEntry[] = [
+    {
+      logId: 'dispatch-block-1',
+      timestamp: '2026-03-16T12:00:03.000Z',
+      correlationId: 'corr-block-1',
+      planId,
+      packetId: 'packet-queued',
+      projectId: 'proj-1',
+      eventType: 'dispatch_failed',
+      phase: 'dispatcher',
+      actor: 'control-layer-dispatcher',
+      result: 'error',
+      message: 'dispatch blocked',
+      metadata: { reason: 'skipped_dependency_not_satisfied' },
+    },
+  ];
+  await writeFixture({ rootDir, plan, packets, logs });
+
+  try {
+    const summary = await getPlanStatusSummary({
+      planId,
+      stateRoot: join(rootDir, 'state'),
+    });
+    assert.equal(summary.operatorState, 'blocked_governance_or_dependencies');
+    assert.deepEqual(summary.blockingReasons, ['skipped_dependency_not_satisfied']);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('ready packet with governance/capacity block reason reports blocked_governance_or_dependencies', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'plan-status-ready-blocked-governance-'));
+  const planId = 'plan-status-ready-blocked-governance';
+  const packets = [createPacket({ planId, packetId: 'packet-ready', status: 'ready' })];
+  const plan = createPlan(planId, packets, 'active');
+  const logs: ExecutionLogEntry[] = [
+    {
+      logId: 'dispatch-block-2',
+      timestamp: '2026-03-16T12:00:04.000Z',
+      correlationId: 'corr-block-2',
+      planId,
+      packetId: 'packet-ready',
+      projectId: 'proj-1',
+      eventType: 'dispatch_failed',
+      phase: 'dispatcher',
+      actor: 'control-layer-dispatcher',
+      result: 'error',
+      message: 'dispatch blocked by policy',
+      metadata: { reason: 'skipped_risk_or_approval_block' },
+    },
+  ];
+  await writeFixture({ rootDir, plan, packets, logs });
+
+  try {
+    const summary = await getPlanStatusSummary({
+      planId,
+      stateRoot: join(rootDir, 'state'),
+    });
+    assert.equal(summary.operatorState, 'blocked_governance_or_dependencies');
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('escalated plan reports failed_terminal regardless of packet statuses', async () => {
   const rootDir = await mkdtemp(join(tmpdir(), 'plan-status-escalated-terminal-'));
   const planId = 'plan-status-escalated-terminal';
@@ -270,7 +339,12 @@ test('summary includes packet counts and latest known reasons', async () => {
     assert.equal(summary.latestStopReasons.dispatch, 'skipped_risk_or_approval_block');
     assert.equal(summary.latestStopReasons.reconcile, 'retry_exhausted');
     assert.equal(summary.latestStopReasons.plan, 'waiting_for_external_input');
+    assert.deepEqual(
+      summary.blockingReasons,
+      ['retry_exhausted', 'skipped_risk_or_approval_block', 'waiting_for_external_input'],
+    );
     assert.equal(summary.operatorSummary.packetCounts.totalPackets, 3);
+    assert.deepEqual(summary.operatorSummary.blockingReasons, summary.blockingReasons);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

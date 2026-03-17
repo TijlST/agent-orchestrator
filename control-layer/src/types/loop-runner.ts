@@ -21,4 +21,5 @@ export interface SingleCycleRunnerResult {
   operatorState: OperatorPlanState;
   packetCounts: PlanStatusCounts;
   latestStopReasons: PlanStatusLatestReasons;
+  blockingReasons: string[];
 }

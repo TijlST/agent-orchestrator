@@ -104,6 +104,7 @@ function createCycleResult(overrides: Partial<PlanCycleRunnerResult>): PlanCycle
       reconcile: null,
       plan: null,
     },
+    blockingReasons: overrides.blockingReasons ?? [],
   };
 }
 
@@ -134,6 +135,44 @@ test('run-until-blocked stops with blocked_waiting when no further progress is p
     assert.equal(result.stopReason, 'blocked_waiting');
     assert.equal(result.cyclesExecuted, 1);
     assert.equal(result.operatorState, 'blocked_waiting');
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('run-until-blocked stops with blocked_governance_or_dependencies when dispatch is blocked', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'until-blocked-governance-'));
+  const stateRoot = join(rootDir, 'state');
+  const planId = 'plan-blocked-governance';
+  const packets = [createPacket({ packetId: 'packet-queued', planId, status: 'queued' })];
+
+  await writeFixture(rootDir, createPlan(planId, packets, 'active'), packets);
+
+  try {
+    const result = await runUntilBlocked(
+      { planId, maxCycles: 3 },
+      {
+        stateRoot,
+        cycleRunner: async () =>
+          createCycleResult({
+            planId,
+            stopReason: 'blocked_governance_or_dependencies',
+            remainingWaiting: 0,
+            remainingReady: 0,
+            remainingQueued: 1,
+            operatorState: 'blocked_governance_or_dependencies',
+            latestStopReasons: {
+              dispatch: 'skipped_dependency_not_satisfied',
+              reconcile: null,
+              plan: null,
+            },
+            blockingReasons: ['skipped_dependency_not_satisfied'],
+          }),
+      },
+    );
+
+    assert.equal(result.stopReason, 'blocked_governance_or_dependencies');
+    assert.equal(result.cyclesExecuted, 1);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }
@@ -212,6 +251,25 @@ test('run-until-blocked stops with max_iterations_reached when capped', async ()
     assert.equal(result.stopReason, 'max_iterations_reached');
     assert.equal(result.lastCycleStopReason, 'dispatched_packets');
     assert.equal(result.cyclesExecuted, 2);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('run-until-blocked returns failed_terminal for terminal plans before cycle execution', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'until-blocked-failed-terminal-'));
+  const stateRoot = join(rootDir, 'state');
+  const planId = 'plan-failed-terminal';
+  const packets = [createPacket({ packetId: 'packet-failed', planId, status: 'failed' })];
+
+  await writeFixture(rootDir, createPlan(planId, packets, 'failed'), packets);
+
+  try {
+    const result = await runUntilBlocked({ planId, maxCycles: 2 }, { stateRoot });
+
+    assert.equal(result.stopReason, 'failed_terminal');
+    assert.equal(result.cyclesExecuted, 0);
+    assert.equal(result.operatorState, 'failed_terminal');
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }
